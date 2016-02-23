@@ -1,0 +1,4 @@
+.ropeproject
+.venv
+*.log
+agents.csv
