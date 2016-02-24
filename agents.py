@@ -1,6 +1,5 @@
 # -*- coding: utf-8 -*-
 import argparse
-import itertools
 import csv
 import logging
 import math
@@ -13,8 +12,10 @@ logging.basicConfig(filename=LOG_FILENAME, level=logging.DEBUG)
 
 
 class Debt(object):
+    types = []
+
     def __init__(self, id, colls, type, amount):
-        self.id = id
+        self.id = int(id)
         self.collectors = colls
         self.type = type
         self.assigned = None
@@ -31,43 +32,139 @@ class Debt(object):
         return self.__str__()
 
 
-def output_data(debts, debt_types, agents, headers):
-    for dt in debt_types:
-        LOG.info("[%s] distribution (total %d):" % (dt, len(debt_types[dt])))
-        for aname in agents:
-            count = len(agents[aname][dt]) if dt in agents[aname] else 0
-            LOG.info("%s - %d" % (aname, count))
+class Agent(object):
+    def __init__(self, name, percent, grouplen):
+        self.name = name
+        self.percent = percent
+        self.grouplen = grouplen
+        # a dictionary type: [debts list]
+        self.debts = {}
+
+    def add_debt(self, debt):
+        if debt.type not in self.debts:
+            self.debts[debt.type] = []
+        self.debts[debt.type].append(debt)
+        debt.assigned = self.name
+
+    def remove_debt(self, debt):
+        if debt in self.debts[debt.type]:
+            self.debts[debt.type].remove(debt)
+            debt.assigned = None
+
+    def get_limit(self, total):
+        return int(math.floor(total * self.percent / self.grouplen))
+
+    def try_to_assign(self, debt, total, overflow=False):
+        """Tries to assign the debt to the agent.
+
+        Returns True if debt was assigned, False otherwise
+        """
+        if self.name in debt.collectors:
+            # already tried to collect
+            return False
+        if (overflow or debt.type not in self.debts or
+                (len(self.debts[debt.type]) + 1 <= self.get_limit(total))):
+            self.add_debt(debt)
+            return True
+        return False
+
+    def is_discriminated(self, debt_type, total):
+        return len(self.debts[debt_type]) < self.get_limit(total)
+
+    def get_subgroup(self, agents):
+        return [a for a in agents if a.percent == self.percent]
+
+    def __str__(self):
+        res = "%s\n" % self.name
+        for dt in self.debts:
+            res += "[%s] - %d\n" % (dt, len(self.debts[dt]))
+        return res
+
+    def __repr__(self):
+        return self.__str__()
+
+
+def output_data(debts, agents, headers):
+    for dt in Debt.types:
+        LOG.info("[%s] distribution (total %d):" % (dt, len(debts[dt])))
+        for agent in agents:
+            count = len(agent.debts[dt]) if dt in agent.debts else 0
+            LOG.info("%s - %d" % (agent.name, count))
     # form resulting csv
     writer = csv.writer(sys.stdout)
     writer.writerow(headers)
-    for debt in debts:
+    all_debts = []
+    for dt in debts:
+        all_debts.extend(debts[dt])
+    for debt in sorted(all_debts, key=lambda x: x.id):
         row = [debt.id]
         for a in agents:
-            row.append(a if a in debt.collectors else '')
+            row.append(a.name if a.name in debt.collectors else '')
         row.extend([debt.type, debt.assigned, debt.amount])
         writer.writerow(row)
 
 
-def read_input(input_file, agents_prefix):
+def read_input(input_file, agents_prefix, division, divisionN):
     with open(input_file) as csvfile:
         reader = csv.reader(csvfile)
         # first line has headers
         headers = next(reader)
-        agents = {k: {} for k in
-                  [v for v in headers[1:]
-                   if v.startswith(agents_prefix.encode("utf-8"))]}
-        debts = []
-        debt_types = {}
-        agent_count = len(agents.keys())
+        agent_names = [a for a in headers[1:]
+                       if a.startswith(agents_prefix.encode("utf-8"))]
+        agents = []
+        for aname in agent_names:
+            if any(aname.endswith(str(n))
+                   for n in range(1, divisionN + 1)):
+                agent = Agent(aname, percent=division, grouplen=divisionN)
+            else:
+                agent = Agent(aname, percent=1 - division,
+                              grouplen=len(agent_names) - divisionN)
+            agents.append(agent)
+
+        debts = {}
+        agent_count = len(agents)
         for row in reader:
             collectors = [v for v in row[1:agent_count+1] if v != '']
             debt = Debt(row[0], collectors, row[agent_count+1], row[-1])
-            try:
-                debt_types[debt.type].append(debt)
-            except KeyError:
-                debt_types[debt.type] = [debt]
-            debts.append(debt)
-        return debts, debt_types, agents, headers
+            if debt.type not in debts:
+                debts[debt.type] = []
+            debts[debt.type].append(debt)
+            if debt.type not in Debt.types:
+                Debt.types.append(debt.type)
+
+        return debts, agents, headers
+
+
+def eliminate_discrimination(agents, debt, total):
+    # need for a swap
+    # search for agent with uncompleted plan
+    discriminated = next((a for a in agents
+                          if a.is_discriminated(debt.type, total)), None)
+    if discriminated:
+        ok = next((a for a in agents
+                   if not a.is_discriminated(debt.type, total)), None)
+        if not ok:
+            LOG.info("Something went wrong!")
+            return (False, discriminated)
+        swap_debt = next((d for d in ok.debts[debt.type]
+                          if discriminated.name not in d.collectors), None)
+        if ok and swap_debt:
+            ok.remove_debt(swap_debt)
+            ok.add_debt(debt)
+            discriminated.add_debt(swap_debt)
+            return (True, discriminated)
+        LOG.info("Can't find a debt to swap %s with!" % debt.id)
+        return (False, None)
+
+    # find agent with least debts in the group
+    minDebt = min([len(s.debts[debt.type]) for s in agents])
+    agent = next(s for s in agents if len(s.debts[debt.type]) == minDebt)
+    if not agent.try_to_assign(debt, total, overflow=True):
+        for a in [a for a in agents if a != agent]:
+            a.try_to_assign(debt, total, overflow=True)
+            return (True, None)
+        LOG.info("Something went wrong!")
+    return (True, None)
 
 
 def parse_args():
@@ -84,61 +181,26 @@ def parse_args():
     return parser.parse_args()
 
 
-args = parse_args()
-
-
-def make_even(agent, agents):
-    """ Make all agents have more or less the same number of debts.
-
-    Sometimes 1-by-1 debt assignments lead to certain uneven states for some
-    agents (when debts have a certain former collectors record).
-    """
-    pass
-
-
-def get_limit(agent_name, total, agents):
-    if any(agent_name.endswith(str(n)) for n in range(1, args.divisionN + 1)):
-        return args.division * total / args.divisionN
-    return (1 - args.division) * total / (len(agents) - args.divisionN)
-
-
 def main():
+    args = parse_args()
+    debts, agents, headers = read_input(args.input, args.agentPrefix,
+                                        args.division, args.divisionN)
+    for dt in Debt.types:
+        ordered_debts = sorted(debts[dt], reverse=True,
+                               key=lambda x: len(x.collectors))
 
-    debts, debt_types, agents, headers = read_input(args.input,
-                                                    args.agentPrefix)
-
-    # same as previous, result is floored
-    def get_int_limit(agent_name, total):
-        return int(math.floor(get_limit(agent_name, total, agents)))
-
-    def assign_debt(debt):
-        for aname in agents:
-            # if this agent has already tried
-            # to collect the debt - skip
-            if aname in debt.collectors:
-                continue
-            try:
-                if (len(agents[aname][debt.type]) + 1 <= get_int_limit(
-                        aname, len(debts))):
-                    agents[aname][debt.type].append(debt)
-                    debt.assigned = aname
+        def do_assign(debt):
+            for agent in agents:
+                if agent.try_to_assign(debt, len(ordered_debts)):
                     return True
-            except KeyError:
-                agents[aname][debt.type] = [debt]
-                debt.assigned = aname
-                return True
-        return False
+            return False
 
-    for dtname, debts in debt_types.items():
-        agents_spin = itertools.cycle(agents)
-        for debt in debts:
-            if assign_debt(debt):
+        for debt in ordered_debts:
+            if do_assign(debt):
                 continue
-            aname = agents_spin.next()
-            agents[aname][debt.type].append(debt)
-            debt.assigned = aname
+            eliminate_discrimination(agents, debt, len(ordered_debts))
 
-    output_data(debts, debt_types, agents, headers)
+    output_data(debts, agents, headers)
 
 
 if __name__ == "__main__":
