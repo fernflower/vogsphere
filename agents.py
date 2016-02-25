@@ -5,6 +5,8 @@ import logging
 import math
 import sys
 
+import exc
+
 
 LOG = logging.getLogger(__name__)
 LOG_FILENAME = "log.log"
@@ -20,7 +22,9 @@ class Debt(object):
         self.type = type
         self.assigned = None
         try:
-            self.amount = float(amount)
+            # BUGFIX strip \xa0 and replace ',' for '.'
+            # after google docs conversion
+            self.amount = float(amount.replace(u"\xa0", "").replace(",", "."))
         except:
             self.amount = 0
             # LOG.warning("Debt #%s has no amount data!" % self.id)
@@ -84,7 +88,7 @@ class Agent(object):
         return self.__str__()
 
 
-def output_data(debts, agents, headers):
+def output_data(debts, agents, headers, encoding):
     for dt in Debt.types:
         LOG.info("[%s] distribution (total %d):" % (dt, len(debts[dt])))
         for agent in agents:
@@ -92,7 +96,7 @@ def output_data(debts, agents, headers):
             LOG.info("%s - %d" % (agent.name, count))
     # form resulting csv
     writer = csv.writer(sys.stdout)
-    writer.writerow(headers)
+    writer.writerow([h.encode(encoding) for h in headers])
     all_debts = []
     for dt in debts:
         all_debts.extend(debts[dt])
@@ -101,16 +105,20 @@ def output_data(debts, agents, headers):
         for a in agents:
             row.append(a.name if a.name in debt.collectors else '')
         row.extend([debt.type, debt.assigned, debt.amount])
-        writer.writerow(row)
+        writer.writerow([c.encode(encoding)
+                         if isinstance(c, unicode) else c for c in row])
 
 
-def read_input(input_file, agents_prefix, division, divisionN):
+def read_input(input_file, agents_prefix, division, divisionN, encoding):
     with open(input_file) as csvfile:
         reader = csv.reader(csvfile)
         # first line has headers
-        headers = next(reader)
-        agent_names = [a for a in headers[1:]
-                       if a.startswith(agents_prefix.encode("utf-8"))]
+        headers = [c.decode(encoding) for c in next(reader) if c.strip() != ""]
+        agent_names = [a for a in headers[1:] if a.startswith(agents_prefix)]
+        if len(agent_names) == 0:
+            LOG.error("Could not parse agents!")
+            raise exc.ParseException(
+                u"Agents could not be retrieved, prefix: %s" % agents_prefix)
         agents = []
         for aname in agent_names:
             if any(aname.endswith(str(n))
@@ -124,6 +132,7 @@ def read_input(input_file, agents_prefix, division, divisionN):
         debts = {}
         agent_count = len(agents)
         for row in reader:
+            row = [c.decode(encoding) for c in row[:len(headers)]]
             collectors = [v for v in row[1:agent_count+1] if v != '']
             debt = Debt(row[0], collectors, row[agent_count+1], row[-1])
             if debt.type not in debts:
@@ -176,15 +185,20 @@ def parse_args():
     parser.add_argument("--divisionN", type=int, default=4,
                         help=("Last number to get percent set up by "
                               "--division"))
-    parser.add_argument("--agentPrefix", default=u"Агент -",
-                        help="A starting string of an agent csv field")
+    parser.add_argument("--agentPrefix", default="Agent -",
+                        help="A starting string of an agent csv field",
+                        type=lambda s: unicode(s, "utf-8"))
+    parser.add_argument("--encoding", default="utf-8",
+                        help=("an encoding used to encode/decode strings "
+                              "in input/output"))
     return parser.parse_args()
 
 
 def main():
     args = parse_args()
     debts, agents, headers = read_input(args.input, args.agentPrefix,
-                                        args.division, args.divisionN)
+                                        args.division, args.divisionN,
+                                        args.encoding)
     for dt in Debt.types:
         ordered_debts = sorted(debts[dt], reverse=True,
                                key=lambda x: len(x.collectors))
@@ -200,7 +214,7 @@ def main():
                 continue
             eliminate_discrimination(agents, debt, len(ordered_debts))
 
-    output_data(debts, agents, headers)
+    output_data(debts, agents, headers, args.encoding)
 
 
 if __name__ == "__main__":
