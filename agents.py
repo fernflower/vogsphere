@@ -88,14 +88,14 @@ class Agent(object):
         return self.__str__()
 
 
-def output_data(debts, agents, headers, encoding):
+def output_data(debts, agents, headers, encoding, outstream=sys.stdout):
     for dt in Debt.types:
         LOG.info("[%s] distribution (total %d):" % (dt, len(debts[dt])))
         for agent in agents:
             count = len(agent.debts[dt]) if dt in agent.debts else 0
             LOG.info("%s - %d" % (agent.name, count))
     # form resulting csv
-    writer = csv.writer(sys.stdout)
+    writer = csv.writer(outstream)
     writer.writerow([h.encode(encoding) for h in headers])
     all_debts = []
     for dt in debts:
@@ -106,7 +106,8 @@ def output_data(debts, agents, headers, encoding):
             row.append(a.name if a.name in debt.collectors else '')
         row.extend([debt.type, debt.assigned, debt.amount])
         writer.writerow([c.encode(encoding)
-                         if isinstance(c, unicode) else c for c in row])
+                        if isinstance(c, unicode) else c for c in row])
+    return True
 
 
 def read_input(input_file, agents_prefix, division, divisionN, encoding):
@@ -194,11 +195,10 @@ def parse_args():
     return parser.parse_args()
 
 
-def main():
-    args = parse_args()
-    debts, agents, headers = read_input(args.input, args.agentPrefix,
-                                        args.division, args.divisionN,
-                                        args.encoding)
+def process(inputfile, prefix, percent, grouplen, encoding="utf-8",
+            outfile=None):
+    debts, agents, headers = read_input(inputfile, prefix, percent, grouplen,
+                                        "utf-8")
     for dt in Debt.types:
         ordered_debts = sorted(debts[dt], reverse=True,
                                key=lambda x: len(x.collectors))
@@ -214,8 +214,17 @@ def main():
                 continue
             eliminate_discrimination(agents, debt, len(ordered_debts))
 
-    output_data(debts, agents, headers, args.encoding)
+    if outfile:
+        with open(outfile, "w") as f:
+            return output_data(debts, agents, headers, encoding, f)
+    return output_data(debts, agents, headers, encoding)
 
+
+def main():
+    args = parse_args()
+    return process(args.input, args.agentPrefix,
+                   args.division, args.divisionN,
+                   args.encoding)
 
 if __name__ == "__main__":
     main()
